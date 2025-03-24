@@ -45,7 +45,7 @@ BUTTON_DISPLAY = 20
 #-------------------------------------------------------------------------
 
 SAFE_DISTANCE = 30.0
-TEMP_THRESHOLD_DEFAULT = 22
+TEMP_THRESHOLD_DEFAULT = 18
 DATA_FILE = "sensor_data.csv"
 MODELS_DIR = "models"
 PLOTS_DIR = "plots"
@@ -392,31 +392,6 @@ def calculate_fan_speed(current_temp, predicted_temp, threshold):
     
     return int(fan_speed)
 
-# def set_fan_speed(speed, enable_safety=True):
-#     """
-#     Set the fan speed with safety checks
-    
-#     Parameters:
-#     speed (int): Desired fan speed (0-100)
-#     enable_safety (bool): Whether to check safety conditions
-    
-#     Returns:
-#     int: Actual fan speed set (may be 0 if safety conditions not met)
-#     """
-#     global safety_override
-    
-#     # Check safety conditions if enabled and not overridden
-#     if enable_safety and not safety_override:
-#         distance = measure_distance()
-#         if distance < SAFE_DISTANCE:
-#             # Object detected too close, stop fan
-#             pwm.ChangeDutyCycle(0)
-#             return 0
-    
-#     # Safe to operate at requested speed
-#     pwm.ChangeDutyCycle(speed)
-#     return speed
-
 # Update the set_fan_speed function to use the logistic regression model for safety checks
 def set_fan_speed(speed, enable_safety=True):
     """
@@ -434,14 +409,18 @@ def set_fan_speed(speed, enable_safety=True):
     # Check safety conditions if enabled and not overridden
     if enable_safety and not safety_override:
         distance = measure_distance()
-        temperature, humidity = read_dht_sensor()  # Get current temperature and humidity
+        temperature, humidity = read_dht_sensor()
+        if distance < SAFE_DISTANCE:
+            # Object detected too close, stop fan
+            pwm.ChangeDutyCycle(0)
+            return 0
         if logistic_model is not None:
             # Predict safety status using logistic regression model
             safety_prob = logistic_model.predict_proba([[temperature, humidity, speed, distance]])[0][1]
             if safety_prob < 0.5:  # If probability of being safe is less than 50%
                 pwm.ChangeDutyCycle(0)
                 return 0
-    
+
     # Safe to operate at requested speed
     pwm.ChangeDutyCycle(speed)
     return speed
