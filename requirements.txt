@@ -1,0 +1,9 @@
+adafruit-circuitpython-dht
+RPLCD
+numpy
+pandas
+matplotlib
+scikit-learn
+statsmodels
+seaborn
+smbus2
