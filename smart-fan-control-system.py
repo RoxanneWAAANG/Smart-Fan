@@ -11,6 +11,8 @@ from sklearn.linear_model import LinearRegression
 import pickle
 import threading
 import sys
+import board
+import adafruit_dht
 
 # Initialize GPIO
 GPIO.setmode(GPIO.BCM)
@@ -40,12 +42,12 @@ BUTTON_DISPLAY = 20
 # CONSTANTS
 #-------------------------------------------------------------------------
 
-SAFE_DISTANCE = 30.0  # cm - minimum safe distance for fan operation
-TEMP_THRESHOLD_DEFAULT = 27.5  # °C - default temperature threshold
+SAFE_DISTANCE = 30.0
+TEMP_THRESHOLD_DEFAULT = 22
 DATA_FILE = "sensor_data.csv"
 MODELS_DIR = "models"
 PLOTS_DIR = "plots"
-LCD_ADDRESS = 0x27  # I2C address for LCD
+LCD_ADDRESS = 0x27
 LCD_COLS = 16
 LCD_ROWS = 2
 
@@ -62,10 +64,10 @@ for directory in [MODELS_DIR, PLOTS_DIR]:
 predictor = None
 
 # System state
-current_mode = 0  # Display mode index
+current_mode = 0
 DISPLAY_MODES = ["Current", "Prediction", "System", "Stats"]
 temp_threshold = TEMP_THRESHOLD_DEFAULT
-button_function = 0  # 0 = threshold adjustment, 1 = safety override
+button_function = 0
 safety_override = False
 is_running = True
 
@@ -91,8 +93,17 @@ GPIO.output(MOTOR_PIN_1, GPIO.HIGH)
 GPIO.output(MOTOR_PIN_2, GPIO.LOW)
 
 # Setup PWM for motor speed control
-pwm = GPIO.PWM(MOTOR_ENABLE, 1000)  # 1000 Hz frequency
-pwm.start(0)  # Start with 0% duty cycle (off)
+pwm = GPIO.PWM(MOTOR_ENABLE, 1000)
+pwm.start(0)
+
+# DHT11 Sensor setup
+try:
+    dht_device = adafruit_dht.DHT11(board.D4)  # D4 corresponds to GPIO 4
+    dht_available = True
+    print("DHT11 sensor initialized")
+except Exception as e:
+    print(f"DHT11 sensor initialization error: {e}")
+    dht_available = False
 
 # Setup LCD
 try:
@@ -105,9 +116,9 @@ except Exception as e:
 
 # Setup buttons - Use direct GPIO instead of gpiozero
 # Only set up the two buttons we have
-GPIO.setup(BUTTON_MODE, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-GPIO.setup(BUTTON_DISPLAY, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-buttons_available = False  # We'll set this to True if setup succeeds
+GPIO.setup(BUTTON_MODE, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(BUTTON_DISPLAY, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+buttons_available = False
 
 #-------------------------------------------------------------------------
 # SENSOR FUNCTIONS
@@ -115,7 +126,7 @@ buttons_available = False  # We'll set this to True if setup succeeds
 
 def read_dht_sensor():
     """
-    Read temperature and humidity from DHT11 sensor
+    Read temperature and humidity from DHT11 sensor using Adafruit library
     
     Returns:
     tuple: (temperature, humidity) or (None, None) if read fails
@@ -128,17 +139,16 @@ def read_dht_sensor():
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            result = dht_sensor.read()
-            if result.is_valid():
-                return result.temperature, result.humidity
-            else:
-                print(f"Invalid DHT11 reading (attempt {attempt+1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    time.sleep(1)  # Wait before retry
+            temperature = dht_device.temperature
+            humidity = dht_device.humidity
+            return temperature, humidity
+        except RuntimeError as e:
+            # DHT sensors sometimes fail to read, retry after a short delay
+            print(f"DHT11 reading error (attempt {attempt+1}/{max_retries}): {e}")
+            time.sleep(2.0)
         except Exception as e:
-            print(f"DHT11 Error: {e} (attempt {attempt+1}/{max_retries})")
-            if attempt < max_retries - 1:
-                time.sleep(1)  # Wait before retry
+            print(f"Unexpected DHT11 error: {e}")
+            break
     
     # If all retries fail, return test data rather than None
     print("Using simulated temperature data after sensor read failures")
@@ -154,29 +164,29 @@ def measure_distance():
     try:
         # Send trigger pulse
         GPIO.output(TRIG_PIN, False)
-        time.sleep(0.01)  # Short delay
+        time.sleep(0.01)
         
         GPIO.output(TRIG_PIN, True)
-        time.sleep(0.00001)  # 10µs pulse
+        time.sleep(0.00001)
         GPIO.output(TRIG_PIN, False)
         
         # Wait for echo pin to go high
         pulse_start = time.time()
-        timeout = pulse_start + 0.1  # 100ms timeout
+        timeout = pulse_start + 0.1
         
         while GPIO.input(ECHO_PIN) == 0:
             pulse_start = time.time()
             if time.time() - pulse_start > timeout:
-                return float('inf')  # Timeout
+                return float('inf')
         
         # Wait for echo pin to go low
         pulse_end = time.time()
-        timeout = pulse_end + 0.1  # 100ms timeout
+        timeout = pulse_end + 0.1
         
         while GPIO.input(ECHO_PIN) == 1:
             pulse_end = time.time()
             if time.time() - pulse_end > timeout:
-                return float('inf')  # Timeout
+                return float('inf')
         
         # Calculate distance
         pulse_duration = pulse_end - pulse_start
@@ -400,7 +410,7 @@ def set_fan_speed(speed, enable_safety=True):
 
 def log_data(timestamp, temperature, humidity, predicted_temp, fan_speed, distance):
     """
-    Log sensor data and system status to CSV file
+    Log sensor data and system status to CSV file with consistent formatting
     
     Parameters:
     timestamp (str): Current timestamp
@@ -411,30 +421,81 @@ def log_data(timestamp, temperature, humidity, predicted_temp, fan_speed, distan
     distance (float): Distance reading from ultrasonic sensor
     """
     try:
-        # Create data row
-        row = {
-            'timestamp': timestamp,
-            'temperature': temperature if temperature is not None else '',
-            'humidity': humidity if humidity is not None else '',
-            'predicted_temp': predicted_temp if predicted_temp is not None else '',
-            'fan_speed': fan_speed,
-            'distance': distance if distance != float('inf') else '',
-            'safety_status': 'Unsafe' if distance < SAFE_DISTANCE else 'Safe'
-        }
+        # Ensure timestamp has consistent format (YYYY-MM-DD HH:MM:SS)
+        if isinstance(timestamp, str):
+            # Try to ensure consistent formatting
+            try:
+                # If timestamp is not in the expected format, this will raise ValueError
+                datetime_obj = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                formatted_timestamp = timestamp  # Keep it as is if already correct
+            except ValueError:
+                # If timestamp is in a different format, use current time
+                datetime_obj = datetime.now()
+                formatted_timestamp = datetime_obj.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            # If timestamp is not a string (e.g., it's a datetime object)
+            formatted_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Create file with header if it doesn't exist
+        # Format all values consistently, ensuring proper handling of None/invalid values
+        # formatted_row = [
+        #     formatted_timestamp,
+        #     f"{temperature:.2f}" if temperature is not None else "",
+        #     f"{humidity:.2f}" if humidity is not None else "",
+        #     f"{predicted_temp:.2f}" if predicted_temp is not None else "",
+        #     f"{fan_speed}" if fan_speed is not None else "0",
+        #     f"{distance:.2f}" if distance is not None and distance != float('inf') else "",
+        #     "Unsafe" if distance is not None and distance < SAFE_DISTANCE else "Safe"
+        # ]
+        formatted_row = [
+            formatted_timestamp,
+            f"{temperature:.2f}" if temperature is not None else "",
+            f"{humidity:.2f}" if humidity is not None else "",
+            f"{distance:.2f}" if distance is not None and distance != float('inf') else "",
+        ]
+        
+        # Check if file exists to determine if header needs to be written
         file_exists = os.path.isfile(DATA_FILE)
         
-        with open(DATA_FILE, 'a', newline='') as csvfile:
-            fieldnames = row.keys()
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        # Use a simple lock mechanism to prevent concurrent writes
+        lockfile = DATA_FILE + ".lock"
+        
+        # Wait for lock to be released (simple file-based locking)
+        max_wait = 5  # seconds
+        start_time = time.time()
+        while os.path.exists(lockfile) and time.time() - start_time < max_wait:
+            time.sleep(0.1)
+        
+        # Create lock file
+        try:
+            with open(lockfile, 'w') as f:
+                f.write(str(os.getpid()))
             
-            if not file_exists:
-                writer.writeheader()
+            # Open file and write data
+            with open(DATA_FILE, 'a', newline='') as csvfile:
+                if not file_exists:
+                    # Write header
+                    header = "timestamp,temperature,humidity,predicted_temp,fan_speed,distance,safety_status\n"
+                    csvfile.write(header)
                 
-            writer.writerow(row)
+                # Write data row and ensure it ends with a newline
+                data_row = ','.join(formatted_row)
+                if not data_row.endswith('\n'):
+                    data_row += '\n'
+                csvfile.write(data_row)
+                
+                # Ensure data is written to disk
+                csvfile.flush()
+                os.fsync(csvfile.fileno())
+                
+        finally:
+            # Always remove lock file, even if an error occurs
+            if os.path.exists(lockfile):
+                os.remove(lockfile)
+                
     except Exception as e:
         print(f"Error logging data: {e}")
+        import traceback
+        traceback.print_exc()
 
 def analyze_data():
     """
@@ -489,7 +550,7 @@ def analyze_data():
         plt.plot(data['timestamp'], data['predicted_temp'], 'r--', label='Predicted Temp')
         plt.axhline(y=temp_threshold, color='g', linestyle='-', label='Threshold')
         plt.title('Temperature: Actual vs Predicted')
-        plt.ylabel('Temperature (°C)')
+        plt.ylabel('Temperature (C)')
         plt.legend()
         
         # Plot 2: Fan Speed
@@ -654,11 +715,15 @@ def button_callback(channel):
     Parameters:
     channel (int): GPIO pin number that triggered the event
     """
-    global button_function
+    global current_mode, button_function
+    
+    print(f"Button press detected on pin {channel}")
     
     if channel == BUTTON_MODE:
+        print("MODE button pressed")
         change_mode()
     elif channel == BUTTON_DISPLAY:
+        print("DISPLAY button pressed")
         # Cycle through functions
         button_function = (button_function + 1) % 2
         
@@ -679,7 +744,7 @@ def adjust_threshold():
     temp_threshold += 0.5
     if temp_threshold > 30:
         temp_threshold = 25
-    print(f"Threshold adjusted to: {temp_threshold}°C")
+    print(f"Threshold adjusted to: {temp_threshold}C")
     
     if lcd_available:
         lcd.clear()
@@ -708,10 +773,10 @@ try:
     # Use a more reliable method for button detection
     GPIO.remove_event_detect(BUTTON_MODE)
     GPIO.remove_event_detect(BUTTON_DISPLAY)
-    time.sleep(0.1)  # Short delay to ensure events are cleared
+    time.sleep(0.1)
     
-    GPIO.add_event_detect(BUTTON_MODE, GPIO.FALLING, callback=button_callback, bouncetime=300)
-    GPIO.add_event_detect(BUTTON_DISPLAY, GPIO.FALLING, callback=button_callback, bouncetime=300)
+    GPIO.add_event_detect(BUTTON_MODE, GPIO.RISING, callback=button_callback, bouncetime=300)
+    GPIO.add_event_detect(BUTTON_DISPLAY, GPIO.RISING, callback=button_callback, bouncetime=300)
     buttons_available = True
     print("Button interface initialized (2-button mode)")
 except Exception as e:
@@ -755,7 +820,7 @@ def menu_control():
 
 def periodic_analysis():
     """Run analysis periodically"""
-    global predictor  # Access the global predictor instance
+    global predictor
     
     while is_running:
         try:
@@ -777,7 +842,7 @@ def periodic_analysis():
                 
         except Exception as e:
             print(f"Error in periodic analysis: {e}")
-            time.sleep(60)  # Wait a minute before trying again
+            time.sleep(60)
 
 #-------------------------------------------------------------------------
 # MAIN PROGRAM
@@ -829,10 +894,10 @@ def main():
             # Always ensure we have values - never None
             if temperature is None:
                 print("Using default temperature after sensor read failure")
-                temperature = 25  # Default reasonable temperature
+                temperature = 25
                 
             if humidity is None:
-                humidity = 50  # Default reasonable humidity
+                humidity = 50
                 
             # Store current temperature for next iteration comparison
             if last_temp is not None:
@@ -883,11 +948,11 @@ def main():
             metrics = predictor.get_performance_metrics()
             linear_mae = metrics['linear']['mae']
             if linear_mae is not None:
-                print(f"Temperature: {temperature:.1f}°C, Predicted: {predicted_temp:.1f}°C, "
+                print(f"Temperature: {temperature:.1f}C, Predicted: {predicted_temp:.1f}C, "
                       f"Fan: {actual_fan_speed}%, Distance: {distance:.1f}cm, "
-                      f"Model MAE: {linear_mae:.2f}°C")
+                      f"Model MAE: {linear_mae:.2f}C")
             else:
-                print(f"Temperature: {temperature}°C, Predicted: {predicted_temp}°C, "
+                print(f"Temperature: {temperature}C, Predicted: {predicted_temp}C, "
                       f"Fan: {actual_fan_speed}%, Distance: {distance}cm")
             
             # Sleep before next reading
